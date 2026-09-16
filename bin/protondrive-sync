@@ -356,7 +356,16 @@ class SyncEngine:
                     emit("activity", action="deleted-remote", path=rel)
                     self.state.pop(rel, None)
                 except CliError as exc:
-                    emit("activity", action="error", path=rel, detail=str(exc))
+                    if "not found" in str(exc).lower():
+                        # Already gone -- the goal ("remote doesn't have
+                        # this") is already achieved, so this isn't a
+                        # failure. Can genuinely happen: e.g. it was never
+                        # actually uploaded before a rename raced this
+                        # delete-propagation.
+                        emit("activity", action="deleted-remote", path=rel)
+                        self.state.pop(rel, None)
+                    else:
+                        emit("activity", action="error", path=rel, detail=str(exc))
             else:
                 emit("activity", action="conflict", path=rel,
                      detail="deleted locally but edited remotely; keeping remote edit")
@@ -377,6 +386,10 @@ class SyncEngine:
             if not local_changed or self.conflict_strategy == "remote":
                 try:
                     os.remove(self._local_path(rel))
+                    emit("activity", action="deleted-local", path=rel)
+                    self.state.pop(rel, None)
+                except FileNotFoundError:
+                    # Already gone locally -- goal achieved, not a failure.
                     emit("activity", action="deleted-local", path=rel)
                     self.state.pop(rel, None)
                 except OSError as exc:

@@ -81,6 +81,18 @@ Item {
     activity = next
   }
 
+  // Defensive: whatever a CLI subprocess prints on a bad day (a stray
+  // control character, a multi-line dump, no length limit at all) should
+  // never be able to render as unreadable noise in the panel. Caught live:
+  // one error surfaced as a bare line of "=" characters with no visible
+  // explanation, root cause unconfirmed but not worth trusting CLI output
+  // to be well-formed ever again.
+  function sanitizeError(text) {
+    var value = String(text || "").replace(/[\x00-\x09\x0b-\x1f]/g, " ").trim()
+    if (value.length > 200) value = value.substring(0, 200) + "…"
+    return value
+  }
+
   function handleEvent(line) {
     var text = String(line || "").trim()
     if (text === "") return
@@ -100,10 +112,10 @@ Item {
       lastSyncTs = obj.ts || (Date.now() / 1000)
     } else if (obj.type === "activity") {
       pushActivity(obj)
-      if (obj.action === "error") lastError = obj.detail || obj.path || "sync error"
+      if (obj.action === "error") lastError = sanitizeError(obj.detail || obj.path || "sync error")
       else if (obj.action === "conflict") lastError = ""
     } else if (obj.type === "error") {
-      lastError = obj.message || "sync error"
+      lastError = sanitizeError(obj.message || "sync error")
     }
   }
 
