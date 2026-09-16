@@ -16,11 +16,47 @@ limitations. See `CLAUDE.md` if you're an AI agent picking up work here.
 
 ## Requirements
 
-- [Proton Drive CLI](https://proton.me/download/drive/cli), installed and
-  logged in (`proton-drive auth login`).
+- Proton Drive CLI, installed and logged in -- see below.
 - `inotify-tools` (for instant local-change detection; without it, local
-  changes still sync, just only on the poll interval).
-- `python3` (stdlib only, no extra packages).
+  changes still sync, just only on the poll interval):
+  ```
+  sudo pacman -S inotify-tools
+  ```
+- `python3` (stdlib only, no extra packages) -- already on any Omarchy
+  install.
+
+### Installing the Proton Drive CLI on Omarchy
+
+It's not packaged for Arch/AUR (checked, not present as of this writing)
+-- Proton ships it as a single self-contained binary. Download it, verify
+it, put it on your `PATH`, then log in:
+
+```
+curl -fsSL -o ~/.local/bin/proton-drive \
+  https://proton.me/download/drive/cli/0.8.0/linux-x64/proton-drive
+chmod +x ~/.local/bin/proton-drive
+```
+
+Verify the checksum before trusting it (values change every release --
+confirm the current one at
+[proton.me/download/drive/cli](https://proton.me/download/drive/cli/index.html)
+rather than assuming the one below is still current):
+
+```
+echo "cf61c2688c45e1055d8add6221d9471a5a5b64bf3bcdb86460f5cb18414596cc4df3cdb6627c9097c94bec32a3c9915ada3211ef2ae5be33c46ebbc996ccaa28  $HOME/.local/bin/proton-drive" | sha512sum -c -
+```
+
+`~/.local/bin` is already on `PATH` for a default Omarchy user account. If
+`proton-drive` immediately crashes with `Illegal instruction` (older
+CPUs without AVX2 -- uncommon, but happens on some NAS/embedded
+hardware), re-download using the `linux-x64-baseline` build instead of
+`linux-x64` in the URL above.
+
+Then authenticate (opens a browser, no password on the command line):
+
+```
+proton-drive auth login
+```
 
 ## Install
 
