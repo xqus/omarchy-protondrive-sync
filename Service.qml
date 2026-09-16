@@ -120,8 +120,13 @@ Item {
     daemonProcess.running = true
   }
 
+  property bool _intentionalStop: false
+
   function stop() {
-    if (daemonProcess.running) daemonProcess.running = false
+    if (daemonProcess.running) {
+      _intentionalStop = true
+      daemonProcess.running = false
+    }
   }
 
   function restart() {
@@ -243,7 +248,14 @@ Item {
     onRunningChanged: root.running = daemonProcess.running
     onExited: function(exitCode) {
       root.running = false
-      if (exitCode !== 0) root.lastError = "protondrive-sync exited unexpectedly (code " + exitCode + ")"
+      // A restart (settings change, or explicit stop) kills the process
+      // itself via `running = false`, which surfaces here as a nonzero/
+      // signal exit code. That's expected, not a crash -- only report an
+      // error for an exit we didn't ask for.
+      if (!root._intentionalStop && exitCode !== 0) {
+        root.lastError = "protondrive-sync exited unexpectedly (code " + exitCode + ")"
+      }
+      root._intentionalStop = false
     }
   }
 }
