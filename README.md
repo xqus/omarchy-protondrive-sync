@@ -38,10 +38,15 @@ omarchy plugin add /path/to/omarchy-protondrive-sync --enable
 
 ## Configure
 
-There is currently no settings GUI to click through -- Omarchy's shell
-stores a manifest `schema` for bar-widget settings but (as of the version
-this was built against) never renders it into a form. Set values with the
-bar CLI instead, which is also what any GUI would write to under the hood:
+Click the ⚙ in the panel to open the settings form (local folder, Proton
+Drive folder, poll interval, conflict strategy) and hit Save. Omarchy's
+shell doesn't provide a generic settings GUI of its own -- the manifest
+`schema` is stored but never rendered into a form anywhere in the version
+this was built against -- so this plugin ships its own, writing through
+the same `setBarWidget` shell IPC call the `omarchy bar set` CLI itself
+uses.
+
+You can also set values directly from a terminal, which is equivalent:
 
 ```
 omarchy bar set xqus.protondrive-sync localFolder "~/ProtonSync"

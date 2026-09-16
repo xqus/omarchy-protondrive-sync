@@ -152,6 +152,21 @@ exact subcommand name with `omarchy plugin --help` if it's changed).
   in a folder). `ensure_path`/`create_folder` return whether they *actually*
   created something so the caller doesn't log a false "created" for an
   idempotent no-op.
+- `restart()` originally did `stop(); Qt.callLater(start)`. `Qt.callLater`
+  only defers to the next event-loop tick, which runs *before* the
+  underlying `QProcess` has actually finished exiting -- so `start()`'s own
+  `daemonProcess.running` guard silently no-op'd and a settings change just
+  killed the daemon forever instead of restarting it. Fixed by restarting
+  from `onExited` instead (`_pendingRestart` flag), which only fires once
+  the process is actually gone. Caught live via `setBarWidget` +`debug`,
+  not by inspection -- the bug produced no error, just a daemon that never
+  came back.
+- Relatedly: `stop()` killing the daemon (via `running = false`) surfaces
+  in `onExited` as a nonzero/signal exit code, indistinguishable from a
+  real crash unless you track that the stop was intentional
+  (`_intentionalStop`). Without that flag, every ordinary settings-change
+  restart showed a scary "exited unexpectedly" error in the panel for
+  completely normal behavior.
 - `Service.qml`'s `onLocalFolderChanged`/`onRemoteFolderChanged`/etc. only
   called `restart()`, guarded by `if (running)`. That covers a daemon
   that's already going picking up a settings change, but not the far more
