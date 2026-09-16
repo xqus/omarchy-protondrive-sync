@@ -17,6 +17,20 @@ Panel {
   property int rowIndex: 0
   property bool cursorActive: false
 
+  // Model.relativeTime() is a plain function call, not a QML property --
+  // referencing it inside a text binding gives QML no reason to
+  // re-evaluate as real time passes, so "just now" would otherwise freeze
+  // forever once first rendered. This tick is the dependency that makes
+  // those bindings actually refresh.
+  property real nowTick: Date.now()
+  Timer {
+    interval: 15000
+    running: root.opened
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.nowTick = Date.now()
+  }
+
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -154,6 +168,14 @@ Panel {
     function toggle(): void { root.toggle() }
     function syncNow(): string { sync.syncNow(); return "ok" }
     function refresh(): string { sync.refresh(); return "ok" }
+    // Deterministic halt for manual folder surgery (rename/delete outside
+    // the daemon's own logic) -- unlike pause (which only blocks *new*
+    // reconcile cycles and returns before confirming the daemon actually
+    // idled), killing the process is instant and can't race an in-flight
+    // cycle. Poll `debug`'s `running` field until it's false before
+    // touching files; call `start` again afterward.
+    function stop(): string { sync.stop(); return "ok" }
+    function start(): string { sync.start(); return "ok" }
     function debug(): string {
       return JSON.stringify({
         checked: sync.checked,
@@ -252,7 +274,7 @@ Panel {
               width: parent.width
               title: "Proton Drive Sync"
               meta: !sync.running ? "Not running"
-                : (sync.paused ? "Paused" : ("Synced " + Model.relativeTime(sync.lastSyncTs)))
+                : (sync.paused ? "Paused" : ("Synced " + Model.relativeTime(sync.lastSyncTs, root.nowTick)))
               foreground: root.foreground
               fontFamily: root.fontFamily
               iconOpacity: sync.active ? 1.0 : 0.5
@@ -612,7 +634,7 @@ Panel {
         Text {
           textFormat: Text.PlainText
           Layout.fillWidth: true
-          text: activityRow.entry ? Model.relativeTime(activityRow.entry.ts) : ""
+          text: activityRow.entry ? Model.relativeTime(activityRow.entry.ts, root.nowTick) : ""
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

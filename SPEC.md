@@ -186,12 +186,44 @@ upload/download targets a single file, never a folder.
   renaming a non-empty folder also leaves the now-empty old folder behind
   as an orphan on the *other* side once its files are gone, since nothing
   proactively removes it. To rename a folder without the re-upload/
-  re-download cost or the orphan, do it by hand instead: pause the daemon
-  (`pause` over stdin, or the panel's toggle), rename both the local
-  folder and its remote counterpart (`filesystem rename`, which preserves
-  file identity), patch the renamed prefix into `state.json`'s keys, then
-  resume. Done this way for real once already, renaming a synced
-  Obsidian vault folder with zero re-upload/re-download.
+  re-download cost or the orphan, do it by hand instead -- see "Manual
+  folder surgery" below. Done this way for real once already, renaming a
+  synced Obsidian vault folder with zero re-upload/re-download.
+
+### Manual folder surgery
+
+Renaming or removing a synced folder outside the daemon's own logic
+(directly with `mv`/`rmdir`/`proton-drive filesystem rename` on one or
+both sides) needs the daemon fully halted first, not just paused. `pause`
+(over stdin, or the panel's toggle) only blocks a *new* reconcile cycle
+from starting -- a cycle already in progress keeps running to completion,
+which can take a while (each CLI call is a multi-second round trip), and
+the IPC call returns "ok" the instant it writes to the daemon's stdin,
+*not* once the daemon has actually idled. Trusting that as confirmation
+was tried for real and raced a manual fix: the in-flight cycle finished
+using pre-fix data and recreated the very thing that had just been
+removed.
+
+The reliable sequence:
+1. `stop` over IPC (kills the process outright -- deterministic, nothing
+   left running to race).
+2. Poll `debug`'s `running` field until it's `false`.
+3. Make the change on both sides (`mv`/`rmdir` locally,
+   `filesystem rename`/`trash` remotely as needed). If renaming, also
+   patch the renamed prefix into `state.json`'s keys so the daemon
+   recognizes the files as already synced instead of re-transferring
+   everything.
+4. `start` over IPC (or `refresh`, which checks CLI/auth/config first and
+   starts if ready).
+
+One more thing worth knowing even with this sequence: Proton Drive's own
+`trash` doesn't seem to be immediately consistent -- a `filesystem list`
+moments after a `trash` can still briefly show the trashed item. If
+`start` fires right after a `trash` in step 3, the daemon's first
+reconcile pass can occasionally still observe the stale listing and
+recreate the directory it was just told is gone, correcting itself on the
+next pass once the trash has propagated. Leaving a few seconds between
+step 3 and step 4 avoids this.
 - **Empty directories are mirrored but never deleted**, even if removed on
   the other side. An empty-folder-existence check was judged too blunt a
   signal to safely drive a recursive delete; the failure mode is a stray

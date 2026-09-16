@@ -177,3 +177,23 @@ exact subcommand name with `omarchy plugin --help` if it's changed).
   added. Caught live: the panel sat on "stopped" indefinitely after
   configuring both folders, even though a manual `refresh` IPC call proved
   CLI/auth/config were all fine.
+- `pause` over IPC is fire-and-forget: it returns "ok" the instant it
+  writes to the daemon's stdin, not once the daemon has actually idled.
+  An in-flight reconcile cycle keeps running to completion regardless
+  (each CLI call is multi-second, so this window is real). Trusted this
+  as confirmation while doing manual folder surgery live and it raced --
+  the in-flight cycle finished using pre-fix data and recreated what had
+  just been deleted. `stop`/`start` IPC methods now exist specifically
+  for this (kill the process outright, poll `debug`'s `running` field for
+  confirmation, do the surgery, `start` again) -- see SPEC.md "Manual
+  folder surgery." Don't use `pause` for anything where the race matters.
+- `Model.relativeTime(ts)` calls inside a QML text binding don't
+  re-evaluate as time passes -- `Date.now()` isn't a tracked QML
+  property, so referencing it inside a binding gives QML no dependency to
+  react to, and "just now" freezes forever once first rendered. Needs an
+  explicit ticking property (`nowTick`, updated by a `Timer`) passed in
+  as `relativeTime`'s second argument to force re-evaluation. Caught live
+  -- the timestamps just never moved, which is easy to miss for a while
+  since a *changing* value (a new sync event) also correctly refreshes
+  the text, masking the underlying binding problem until enough time
+  passes with nothing else changing.
