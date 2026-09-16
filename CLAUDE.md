@@ -104,9 +104,35 @@ omarchy-shell shell rescanPlugins
 ```
 
 The second form is faster for iterating and doesn't require committing
-first. Saving a file under `~/.config/omarchy/plugins/` hot-reloads it per
-Omarchy's own plugin docs; if a change doesn't seem to apply, force it with
-`omarchy-shell shell rescanPlugins` or `omarchy restart shell`.
+first. Saving a file under `~/.config/omarchy/plugins/` is *supposed* to
+hot-reload it per Omarchy's own plugin docs, but confirmed during this
+plugin's development: that didn't pick up a QML code change here, and
+neither did `omarchy-shell shell rescanPlugins` (which only re-syncs
+manifest/settings metadata, not the actual QML component -- see
+`syncPluginWidgets()` in `/usr/share/omarchy/shell/shell.qml`, which
+explicitly skips re-creating a Component when the entry-point URL is
+unchanged) nor `omarchy plugin disable` + `enable` (which reloaded nothing
+either, since it's the same cached Component by URL). **Only
+`omarchy restart shell` reliably picked up a QML source change** in
+testing. It briefly restarts the whole bar/panel process -- expect a
+flicker, not a crash.
+
+Also confirmed the hard way: **`omarchy plugin disable` followed by
+`enable` does not preserve a widget's settings.** It re-adds a bare
+`{"id": ...}` bar-layout entry, silently dropping whatever
+`localFolder`/`remoteFolder`/etc. had been set before. If you disable/
+enable while testing, you will need to re-run `omarchy bar set` for every
+key afterward. Prefer `omarchy restart shell` over disable+enable for
+both reasons above -- it reloads code AND leaves settings alone.
+
+There is also no settings GUI to speak of yet -- see README.md's
+"Configure" section. `omarchy bar set <id> <key> <value>` is the only
+current way to set a value, and each call merges into the existing
+settings object (confirmed via `setBarWidget` in
+`shell/services/PluginRegistry.qml`: `entry[String(key)] = value`, an
+in-place mutation, not a replace) -- so the settings loss described above
+comes specifically from disable/enable re-adding the entry, not from
+`bar set` itself.
 
 To remove it: `omarchy plugin remove xqus.protondrive-sync` (check the
 exact subcommand name with `omarchy plugin --help` if it's changed).
@@ -126,3 +152,13 @@ exact subcommand name with `omarchy plugin --help` if it's changed).
   in a folder). `ensure_path`/`create_folder` return whether they *actually*
   created something so the caller doesn't log a false "created" for an
   idempotent no-op.
+- `Service.qml`'s `onLocalFolderChanged`/`onRemoteFolderChanged`/etc. only
+  called `restart()`, guarded by `if (running)`. That covers a daemon
+  that's already going picking up a settings change, but not the far more
+  common first-run case: the plugin loads with nothing configured yet
+  (`ready` false, nothing started), and settings arrive afterward via
+  `omarchy bar set`. Nothing reacted to `ready` flipping true in that case
+  until `onReadyChanged: if (ready && !daemonProcess.running) start()` was
+  added. Caught live: the panel sat on "stopped" indefinitely after
+  configuring both folders, even though a manual `refresh` IPC call proved
+  CLI/auth/config were all fine.

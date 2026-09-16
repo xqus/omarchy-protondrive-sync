@@ -38,14 +38,32 @@ omarchy plugin add /path/to/omarchy-protondrive-sync --enable
 
 ## Configure
 
-Open the plugin's settings from the Omarchy bar-widget settings panel:
+There is currently no settings GUI to click through -- Omarchy's shell
+stores a manifest `schema` for bar-widget settings but (as of the version
+this was built against) never renders it into a form. Set values with the
+bar CLI instead, which is also what any GUI would write to under the hood:
+
+```
+omarchy bar set xqus.protondrive-sync localFolder "~/ProtonSync"
+omarchy bar set xqus.protondrive-sync remoteFolder "/my-files/Sync"
+omarchy bar set xqus.protondrive-sync pollIntervalSec 120
+omarchy bar set xqus.protondrive-sync conflictStrategy "Keep both (rename)"
+```
 
 | Setting | Meaning |
 |---|---|
-| Local folder | Folder to watch, e.g. `~/ProtonSync`. Created if missing. |
-| Proton Drive folder | Remote path under `/my-files`, e.g. `/my-files/Sync`. Created if missing. `/devices` ("Computers") is not supported -- see `SPEC.md`. |
-| Remote poll interval | How often to check Proton Drive for changes made elsewhere. |
-| On conflict | What to do when a file changed on both sides since the last sync: keep both (default), prefer local, or prefer remote. |
+| `localFolder` | Folder to watch, e.g. `~/ProtonSync`. Created if missing. |
+| `remoteFolder` | Remote path under `/my-files`, e.g. `/my-files/Sync`. Created if missing. `/devices` ("Computers") is not supported -- see `SPEC.md`. |
+| `pollIntervalSec` | How often to check Proton Drive for changes made elsewhere. |
+| `conflictStrategy` | What to do when a file changed on both sides since the last sync: `"Keep both (rename)"` (default), `"Prefer local"`, or `"Prefer remote"`. |
+
+Each `omarchy bar set` call only touches the one key you name -- it merges
+into the widget's existing settings, so setting one value doesn't clear the
+others. **`omarchy plugin disable` followed by `enable` does not preserve
+settings** -- it re-adds a bare `{"id": ...}` entry to the bar layout, so
+any previously-set keys are gone and need to be set again. Use
+`omarchy restart shell` instead if you need to force a reload (e.g. after
+changing the plugin's QML files), not disable+enable.
 
 Click the bar icon for status, recent activity, and a manual "sync now."
 Right-click the icon to sync immediately; middle-click to re-check
