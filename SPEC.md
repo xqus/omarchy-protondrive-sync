@@ -177,11 +177,21 @@ upload/download targets a single file, never a folder.
 - **No rename/move detection.** Moving or renaming a file (or a non-empty
   folder) is observed as a delete at the old path plus a create at the new
   path -- correct end state, but it re-uploads/re-downloads full content
-  instead of a cheap server-side `filesystem move`/`rename`. A future
+  instead of a cheap server-side `filesystem move`/`rename`, and does so
+  one file at a time, which is slow for a large renamed folder. A future
   version could detect this via matching SHA-1 between a disappeared and
   appeared path within one reconcile pass, but that heuristic risks
   misfiring on duplicate-content files and was deliberately left out of
-  v1 rather than shipped half-verified.
+  v1 rather than shipped half-verified. Combined with the next point,
+  renaming a non-empty folder also leaves the now-empty old folder behind
+  as an orphan on the *other* side once its files are gone, since nothing
+  proactively removes it. To rename a folder without the re-upload/
+  re-download cost or the orphan, do it by hand instead: pause the daemon
+  (`pause` over stdin, or the panel's toggle), rename both the local
+  folder and its remote counterpart (`filesystem rename`, which preserves
+  file identity), patch the renamed prefix into `state.json`'s keys, then
+  resume. Done this way for real once already, renaming a synced
+  Obsidian vault folder with zero re-upload/re-download.
 - **Empty directories are mirrored but never deleted**, even if removed on
   the other side. An empty-folder-existence check was judged too blunt a
   signal to safely drive a recursive delete; the failure mode is a stray
