@@ -167,7 +167,8 @@ Panel {
         localFolder: sync.localFolder,
         remoteFolder: sync.remoteFolder,
         daemonPath: sync.daemonPath,
-        lastError: sync.lastError
+        lastError: sync.lastError,
+        activity: sync.activity
       })
     }
     function pause(): string { if (sync.running && !sync.paused) sync.toggleRunning(); return "ok" }
