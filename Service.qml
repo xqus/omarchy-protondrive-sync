@@ -121,6 +121,7 @@ Item {
   }
 
   property bool _intentionalStop: false
+  property bool _pendingRestart: false
 
   function stop() {
     if (daemonProcess.running) {
@@ -130,8 +131,17 @@ Item {
   }
 
   function restart() {
-    stop()
-    Qt.callLater(start)
+    // Qt.callLater(start) right after stop() is too soon -- the underlying
+    // process hasn't actually finished exiting yet, so start()'s
+    // `daemonProcess.running` guard silently no-ops and nothing restarts.
+    // Restarting from onExited instead guarantees the old process is
+    // actually gone first.
+    if (daemonProcess.running) {
+      _pendingRestart = true
+      stop()
+    } else {
+      start()
+    }
   }
 
   function toggleRunning() {
@@ -256,6 +266,10 @@ Item {
         root.lastError = "protondrive-sync exited unexpectedly (code " + exitCode + ")"
       }
       root._intentionalStop = false
+      if (root._pendingRestart) {
+        root._pendingRestart = false
+        root.start()
+      }
     }
   }
 }
