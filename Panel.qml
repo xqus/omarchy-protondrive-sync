@@ -114,9 +114,29 @@ Panel {
   }
   onRowIndexChanged: scrollCursorIntoView()
 
+  property bool settingsOpen: false
+
+  function openSettings() {
+    settingsOpen = true
+    localFolderField.text = sync.localFolderRaw
+    remoteFolderField.text = sync.remoteFolder
+    pollSpin.value = sync.pollIntervalSec
+    var idx = conflictCombo.find(sync.conflictStrategyLabel)
+    conflictCombo.currentIndex = idx >= 0 ? idx : 0
+  }
+
+  function saveSettings() {
+    if (localFolderField.text !== sync.localFolderRaw) sync.setSetting("localFolder", localFolderField.text)
+    if (remoteFolderField.text !== sync.remoteFolder) sync.setSetting("remoteFolder", remoteFolderField.text)
+    if (pollSpin.value !== sync.pollIntervalSec) sync.setSetting("pollIntervalSec", pollSpin.value)
+    if (conflictCombo.currentText !== sync.conflictStrategyLabel) sync.setSetting("conflictStrategy", conflictCombo.currentText)
+    settingsOpen = false
+  }
+
   Service {
     id: sync
     settings: root.settings
+    pluginId: root.moduleName
   }
 
   Connections {
@@ -273,10 +293,145 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          // Setup: not installed / not logged in / not configured yet.
-          SetupRow {
-            visible: root.needsSetup
+          RowLayout {
             width: parent.width
+
+            Text {
+              Layout.fillWidth: true
+              textFormat: Text.PlainText
+              text: "Proton Drive Sync"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              visible: root.needsSetup && !root.settingsOpen
+            }
+            Item { Layout.fillWidth: true; visible: !(root.needsSetup && !root.settingsOpen) }
+
+            PanelActionButton {
+              iconText: root.settingsOpen ? "✕" : "⚙"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.settingsOpen ? (root.settingsOpen = false) : root.openSettings()
+            }
+          }
+
+          // Settings form -- there is no generic settings GUI in Omarchy's
+          // shell to defer to (the manifest schema is stored but never
+          // rendered anywhere), so this writes directly through the same
+          // setBarWidget shell IPC call `omarchy bar set` itself uses.
+          ColumnLayout {
+            visible: root.settingsOpen
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              text: "SETTINGS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              text: "Local folder"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            TextField {
+              id: localFolderField
+              Layout.fillWidth: true
+              placeholderText: "~/ProtonSync"
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              text: "Proton Drive folder"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            TextField {
+              id: remoteFolderField
+              Layout.fillWidth: true
+              placeholderText: "/my-files/Sync"
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              text: "Remote poll interval (seconds)"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            SpinBox {
+              id: pollSpin
+              Layout.fillWidth: true
+              from: 30
+              to: 3600
+              stepSize: 30
+              editable: true
+            }
+
+            Text {
+              text: "On conflict"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            ComboBox {
+              id: conflictCombo
+              Layout.fillWidth: true
+              model: ["Keep both (rename)", "Prefer local", "Prefer remote"]
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            RowLayout {
+              Layout.fillWidth: true
+              Layout.topMargin: Style.space(4)
+
+              Text {
+                Layout.fillWidth: true
+                visible: sync.settingsBusy
+                text: "Saving…"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              Item { Layout.fillWidth: true; visible: !sync.settingsBusy }
+
+              Button {
+                text: "Save"
+                onClicked: root.saveSettings()
+              }
+            }
+          }
+
+          PanelSeparator {
+            visible: root.settingsOpen
+            foreground: root.foreground
+          }
+
+          // Setup: not installed / not logged in yet -- neither is fixable
+          // from the settings form above, so this is shown independently
+          // of it. Once both are true, "not configured" is handled by the
+          // hint below instead, since the settings form is the actual fix.
+          SetupRow {
+            visible: !sync.cliInstalled || !sync.authenticated
+            width: parent.width
+          }
+
+          Text {
+            visible: sync.cliInstalled && sync.authenticated && !sync.configured && !root.settingsOpen
+            width: parent.width
+            textFormat: Text.PlainText
+            text: "Click ⚙ above to set a local folder and a Proton Drive folder."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+            horizontalAlignment: Text.AlignHCenter
           }
 
           Column {
@@ -347,11 +502,10 @@ Panel {
     implicitHeight: setupRowLayout.implicitHeight + Style.spacing.rowPaddingX
 
     readonly property string title:
-      !sync.cliInstalled ? "proton-drive CLI is not installed"
-      : (!sync.authenticated ? "Log in to Proton Drive" : "Set a folder pair in plugin settings")
+      !sync.cliInstalled ? "proton-drive CLI is not installed" : "Log in to Proton Drive"
     readonly property string subtitle:
       !sync.cliInstalled ? "Install it from proton.me/download/drive/cli, then reopen this panel"
-      : (!sync.authenticated ? "Opens proton-drive auth login in a browser" : "Local folder and Proton Drive folder are both required")
+      : "Opens proton-drive auth login in a browser"
     readonly property bool clickable: sync.cliInstalled && !sync.authenticated && !sync.busy
 
     MouseArea {

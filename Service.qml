@@ -6,6 +6,7 @@ Item {
   id: root
 
   property var settings: ({})
+  property string pluginId: ""
 
   readonly property string home: Quickshell.env("HOME")
 
@@ -145,6 +146,31 @@ Item {
     if (!checkProcess.running) checkProcess.running = true
   }
 
+  // There is no settings GUI anywhere in Omarchy's shell to delegate to --
+  // the manifest schema is stored but never rendered into a form. So the
+  // panel has its own form (see Panel.qml) and writes through the same
+  // `setBarWidget` shell IPC call the `omarchy bar set` CLI itself uses --
+  // an in-place merge into the widget's config entry, not a replace, and
+  // it's what actually triggers the settings hot-reload.
+  property var settingsQueue: []
+  property bool settingsBusy: false
+
+  function setSetting(key, value) {
+    settingsQueue.push({ key: key, value: value })
+    processSettingsQueue()
+  }
+
+  function processSettingsQueue() {
+    if (settingsBusy || settingsQueue.length === 0) return
+    var item = settingsQueue.shift()
+    settingsBusy = true
+    settingsProcess.command = [
+      "omarchy-shell", "shell", "setBarWidget",
+      pluginId, item.key, JSON.stringify(item.value), "{}"
+    ]
+    settingsProcess.running = true
+  }
+
   function login() {
     if (loginProcess.running) return
     loginProcess.running = true
@@ -189,6 +215,17 @@ Item {
     running: false
     command: ["proton-drive", "auth", "login"]
     onExited: function() { root.refresh() }
+  }
+
+  Process {
+    id: settingsProcess
+    running: false
+    command: []
+    onExited: function(exitCode) {
+      root.settingsBusy = false
+      if (exitCode !== 0) root.lastError = "Could not save setting (see logs)"
+      root.processSettingsQueue()
+    }
   }
 
   Process {
