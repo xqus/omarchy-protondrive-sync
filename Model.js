@@ -9,7 +9,7 @@ function parseEventLine(line) {
 }
 
 function activityGlyph(action) {
-  if (action === "uploaded") return "󰤒"
+  if (action === "uploaded") return "󰕒"
   if (action === "downloaded") return "󰇚"
   if (action === "deleted-local" || action === "deleted-remote") return "󰩹"
   if (action === "created-local-dir" || action === "created-remote-dir") return "󰉖"
