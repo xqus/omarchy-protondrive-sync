@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "id": "xqus.protondrive-sync",
+  "name": "Proton Drive Sync",
+  "version": "0.1.0",
+  "author": "xqus",
+  "license": "MIT",
+  "description": "Two-way sync between one local folder and one Proton Drive folder, using the official proton-drive CLI. Local changes sync instantly (inotify); remote changes are picked up on a poll interval.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Proton Drive Sync",
+    "description": "Watch one local folder and one Proton Drive folder, keep them in sync.",
+    "category": "Files",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "localFolder": "",
+      "remoteFolder": "/my-files/Sync",
+      "pollIntervalSec": 120,
+      "conflictStrategy": "Keep both (rename)"
+    },
+    "schema": [
+      {
+        "key": "localFolder",
+        "type": "path",
+        "label": "Local folder",
+        "defaultValue": "",
+        "description": "Folder to watch, e.g. ~/ProtonSync. Created if it doesn't exist."
+      },
+      {
+        "key": "remoteFolder",
+        "type": "string",
+        "label": "Proton Drive folder",
+        "defaultValue": "/my-files/Sync",
+        "description": "Remote path under /my-files. Created if it doesn't exist. /devices (Computers) is not supported -- see SPEC.md."
+      },
+      {
+        "key": "pollIntervalSec",
+        "type": "integer",
+        "label": "Remote poll interval (seconds)",
+        "min": 30,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 120,
+        "description": "How often to check Proton Drive for remote changes. Local changes sync instantly instead of waiting for this."
+      },
+      {
+        "key": "conflictStrategy",
+        "type": "enum",
+        "label": "On conflict",
+        "options": [
+          "Keep both (rename)",
+          "Prefer local",
+          "Prefer remote"
+        ],
+        "defaultValue": "Keep both (rename)",
+        "description": "What to do when a file changed on both sides since the last sync."
+      }
+    ]
+  }
+}

@@ -1,0 +1,542 @@
+#!/usr/bin/env python3
+"""
+protondrive-sync: a single-folder, two-way sync daemon on top of the official
+`proton-drive` CLI.
+
+Talks JSON lines on stdout (one object per line -- see SPEC.md "Daemon
+protocol") and accepts plain-text commands on stdin: pause, resume, sync-now,
+quit. Meant to be spawned and supervised by Service.qml; runs fine standalone
+for manual testing (see README.md).
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
+CLI_TIMEOUT_SEC = 30
+DEBOUNCE_SEC = 1.5
+
+
+def emit(event_type, **fields):
+    payload = {"type": event_type, "ts": time.time()}
+    payload.update(fields)
+    print(json.dumps(payload), flush=True)
+
+
+def unwrap(value, default=""):
+    """proton-drive -j output wraps decryptable fields as {"ok":..,"value":..}.
+    Handle both that shape and a plain scalar defensively -- the CLI's actual
+    output has drifted from its own docs before."""
+    if isinstance(value, dict):
+        if value.get("ok") and "value" in value:
+            return value["value"]
+        return default
+    if value is None:
+        return default
+    return value
+
+
+class CliError(RuntimeError):
+    pass
+
+
+class ProtonDrive:
+    def __init__(self, binary):
+        self.binary = binary
+
+    def _run(self, args, json_output=True, timeout=CLI_TIMEOUT_SEC):
+        # -j is a global flag but must follow the subcommand's own args, not
+        # precede "filesystem" -- confirmed against the live CLI.
+        cmd = [self.binary] + args + (["-j"] if json_output else [])
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, check=False
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CliError(f"{' '.join(args)} timed out") from exc
+        if result.returncode != 0:
+            raise CliError((result.stderr or result.stdout or "unknown error").strip())
+        return result.stdout
+
+    def list_dir(self, remote_path):
+        out = self._run(["filesystem", "list", remote_path])
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError as exc:
+            raise CliError(f"could not parse listing for {remote_path}") from exc
+
+    def create_folder(self, parent_path, name):
+        self._run(["filesystem", "create-folder", parent_path, name], json_output=False)
+
+    def ensure_path(self, remote_path):
+        """Create every missing segment of remote_path, which must live under
+        /my-files. create-folder is single-level and errors if the folder
+        already exists -- that error (whatever its exact text; the CLI's
+        wording isn't documented) is expected and ignored, matching the
+        idempotent-setup pattern noted for this CLI.
+
+        Returns True only if at least one segment was actually newly
+        created, so callers can tell "already existed" apart from "just
+        created it" instead of reporting every idempotent no-op as new."""
+        if not remote_path.startswith("/my-files"):
+            raise CliError(f"refusing to create folders outside /my-files: {remote_path}")
+        rel = remote_path[len("/my-files"):].strip("/")
+        cur = "/my-files"
+        created_any = False
+        for part in [p for p in rel.split("/") if p]:
+            try:
+                self.create_folder(cur, part)
+                created_any = True
+            except CliError:
+                pass
+            cur = f"{cur}/{part}"
+        return created_any
+
+    def upload(self, local_path, remote_parent, strategy):
+        self._run(
+            ["filesystem", "upload", "-f", strategy, local_path, remote_parent],
+            json_output=False,
+        )
+
+    def download(self, remote_path, local_folder, strategy):
+        # download's -f (file-conflict-strategy) accepts rename/remove/skip --
+        # NOT "replace", which is only valid for upload. Confirmed against
+        # live --help; the two directions don't share a strategy vocabulary.
+        self._run(
+            ["filesystem", "download", "-f", strategy, remote_path, local_folder],
+            json_output=False,
+        )
+
+    def trash(self, remote_path):
+        self._run(["filesystem", "trash", remote_path], json_output=False)
+
+
+def sha1_of(path):
+    h = hashlib.sha1()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def local_scan(root):
+    """relpath -> {size, sha1}, skipping symlinks (see SPEC.md limitations)."""
+    entries = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                continue
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
+            entries[rel] = {"size": st.st_size, "sha1": sha1_of(full)}
+    return entries
+
+
+def remote_scan(drive, root):
+    """Returns (files, empty_dirs). files maps relpath -> {path, sha1, size},
+    walking folders one `filesystem list` call at a time (list is
+    single-level, like `ls`). empty_dirs lists every folder (relative to
+    root, including nested ones) whose entire subtree has no files -- a
+    folder containing only other empty folders still counts, so nested
+    empty structure round-trips.
+
+    Raises CliError on any listing failure instead of returning a partial
+    tree -- a half-listed remote must never be mistaken for "everything
+    else was deleted", which would otherwise delete local files that are
+    still on the remote."""
+    entries = {}
+    empty_dirs = []
+
+    def walk(remote_dir, rel_prefix):
+        items = drive.list_dir(remote_dir)
+        subtree_has_file = False
+        for item in items:
+            name = unwrap(item.get("name"), "")
+            if not name:
+                continue
+            rel = f"{rel_prefix}/{name}" if rel_prefix else name
+            remote_path = f"{remote_dir.rstrip('/')}/{name}"
+            if item.get("type") == "folder":
+                if walk(remote_path, rel):
+                    subtree_has_file = True
+            elif item.get("type") == "file":
+                subtree_has_file = True
+                revision = item.get("activeRevision") or {}
+                digests = revision.get("claimedDigests") or {}
+                entries[rel] = {
+                    "path": remote_path,
+                    "sha1": digests.get("sha1"),
+                    "size": item.get("totalStorageSize"),
+                }
+        if not subtree_has_file and rel_prefix != "":
+            empty_dirs.append(rel_prefix)
+        return subtree_has_file
+
+    walk(root, "")
+    return entries, empty_dirs
+
+
+def local_empty_dirs(root):
+    """Every directory (relative to root) whose entire subtree has no
+    files, including nested empty-in-empty structure. Symlinked
+    directories are treated as opaque (never descended, never reported),
+    matching local_scan's handling of symlinks."""
+    has_file_in_subtree = {}
+    empty_dirs = []
+    for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+        if os.path.islink(dirpath):
+            continue
+        rel = os.path.relpath(dirpath, root)
+        rel = "" if rel == "." else rel.replace(os.sep, "/")
+        has_file = any(
+            not os.path.islink(os.path.join(dirpath, f)) for f in filenames
+        )
+        if not has_file:
+            for d in dirnames:
+                child_rel = f"{rel}/{d}" if rel else d
+                if has_file_in_subtree.get(child_rel, False):
+                    has_file = True
+                    break
+        has_file_in_subtree[rel] = has_file
+        if not has_file and rel != "":
+            empty_dirs.append(rel)
+    return empty_dirs
+
+
+class SyncEngine:
+    def __init__(self, args):
+        self.local_root = args.local
+        self.remote_root = args.remote
+        self.poll_interval = args.poll_interval
+        self.conflict_strategy = args.conflict_strategy
+        self.state_path = args.state_file
+        self.drive = ProtonDrive(args.cli_binary)
+
+        self.lock = threading.RLock()
+        self.paused = False
+        self.stop_requested = False
+        self.state = self._load_state()
+
+    def _load_state(self):
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_state(self):
+        tmp = f"{self.state_path}.tmp-{uuid.uuid4().hex}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.state, fh)
+        os.replace(tmp, self.state_path)
+
+    def _local_path(self, rel):
+        return os.path.join(self.local_root, *rel.split("/"))
+
+    def _remote_parent(self, rel):
+        parts = rel.split("/")[:-1]
+        return "/".join([self.remote_root.rstrip("/")] + parts)
+
+    def _reconcile_dirs(self, local_dirs, remote_dirs):
+        """Mirror empty directories onto whichever side is missing them.
+        Deliberately one-directional-per-gap and never deletes a directory:
+        an empty-folder existence check is too blunt a signal to safely
+        drive a recursive delete, so the worst case here is a stray empty
+        folder lingering on one side, never lost data."""
+        local_set, remote_set = set(local_dirs), set(remote_dirs)
+        for rel in sorted(remote_set - local_set):
+            local_path = self._local_path(rel)
+            already = os.path.isdir(local_path)
+            try:
+                os.makedirs(local_path, exist_ok=True)
+                if not already:
+                    emit("activity", action="created-local-dir", path=rel)
+            except OSError as exc:
+                emit("activity", action="error", path=rel, detail=str(exc))
+        for rel in sorted(local_set - remote_set):
+            remote_path = f"{self.remote_root.rstrip('/')}/{rel}"
+            try:
+                if self.drive.ensure_path(remote_path):
+                    emit("activity", action="created-remote-dir", path=rel)
+            except CliError as exc:
+                emit("activity", action="error", path=rel, detail=str(exc))
+
+    def _mark_synced(self, rel, sha1):
+        self.state[rel] = {"localSha1": sha1, "remoteSha1": sha1}
+
+    def _upload(self, rel, strategy="create-new-revision"):
+        parent = self._remote_parent(rel)
+        try:
+            self.drive.ensure_path(parent)
+            self.drive.upload(self._local_path(rel), parent, strategy)
+            emit("activity", action="uploaded", path=rel)
+            return True
+        except CliError as exc:
+            emit("activity", action="error", path=rel, detail=str(exc))
+            return False
+
+    def _download(self, rel, remote_path, strategy="remove"):
+        local_path = self._local_path(rel)
+        os.makedirs(os.path.dirname(local_path) or self.local_root, exist_ok=True)
+        try:
+            self.drive.download(remote_path, os.path.dirname(local_path) or self.local_root, strategy)
+            emit("activity", action="downloaded", path=rel)
+            return True
+        except CliError as exc:
+            emit("activity", action="error", path=rel, detail=str(exc))
+            return False
+
+    def reconcile(self):
+        with self.lock:
+            if self.paused:
+                return
+            try:
+                self.drive.ensure_path(self.remote_root)
+            except CliError as exc:
+                emit("error", message=f"could not create remote folder: {exc}")
+                return
+
+            local = local_scan(self.local_root)
+            try:
+                remote, remote_dirs = remote_scan(self.drive, self.remote_root)
+            except CliError as exc:
+                emit("error", message=f"could not list remote folder, skipping this cycle: {exc}")
+                return
+
+            for rel in sorted(set(local) | set(remote) | set(self.state)):
+                self._reconcile_one(rel, local.get(rel), remote.get(rel))
+
+            self._reconcile_dirs(local_empty_dirs(self.local_root), remote_dirs)
+
+            self._save_state()
+            emit(
+                "state",
+                paused=self.paused,
+                trackedFiles=len(self.state),
+                localFolder=self.local_root,
+                remoteFolder=self.remote_root,
+            )
+
+    def _reconcile_one(self, rel, local_entry, remote_entry):
+        known = self.state.get(rel)
+
+        if local_entry is None and remote_entry is None:
+            self.state.pop(rel, None)
+            return
+
+        if local_entry is None:
+            if known is None:
+                if self._download(rel, remote_entry["path"]):
+                    self._mark_synced(rel, remote_entry["sha1"])
+                return
+            # was tracked, now gone locally. If the remote copy hasn't
+            # changed since our last sync, honor the local deletion. If it
+            # HAS changed, someone edited it after we last saw it -- deleting
+            # that edit out from under them would be a silent data loss, so
+            # treat it as a conflict instead (never a bare "delete wins").
+            remote_changed = known.get("remoteSha1") != remote_entry["sha1"]
+            if not remote_changed or self.conflict_strategy == "local":
+                try:
+                    self.drive.trash(remote_entry["path"])
+                    emit("activity", action="deleted-remote", path=rel)
+                    self.state.pop(rel, None)
+                except CliError as exc:
+                    emit("activity", action="error", path=rel, detail=str(exc))
+            else:
+                emit("activity", action="conflict", path=rel,
+                     detail="deleted locally but edited remotely; keeping remote edit")
+                if self._download(rel, remote_entry["path"]):
+                    self._mark_synced(rel, remote_entry["sha1"])
+            return
+
+        if remote_entry is None:
+            if known is None:
+                if self._upload(rel):
+                    self._mark_synced(rel, local_entry["sha1"])
+                return
+            # was tracked, now gone remotely. Symmetric to the case above:
+            # only honor the remote deletion if the local copy is unchanged
+            # since our last sync; otherwise keep the local edit and
+            # re-upload it rather than silently deleting it.
+            local_changed = known.get("localSha1") != local_entry["sha1"]
+            if not local_changed or self.conflict_strategy == "remote":
+                try:
+                    os.remove(self._local_path(rel))
+                    emit("activity", action="deleted-local", path=rel)
+                    self.state.pop(rel, None)
+                except OSError as exc:
+                    emit("activity", action="error", path=rel, detail=str(exc))
+            else:
+                emit("activity", action="conflict", path=rel,
+                     detail="deleted remotely but edited locally; keeping local edit")
+                if self._upload(rel):
+                    self._mark_synced(rel, local_entry["sha1"])
+            return
+
+        # present on both sides
+        local_changed = known is None or known.get("localSha1") != local_entry["sha1"]
+        remote_changed = known is None or known.get("remoteSha1") != remote_entry["sha1"]
+
+        if local_changed and remote_changed and local_entry["sha1"] != remote_entry["sha1"]:
+            self._resolve_conflict(rel, local_entry, remote_entry)
+        elif local_changed and local_entry["sha1"] != remote_entry["sha1"]:
+            if self._upload(rel):
+                self._mark_synced(rel, local_entry["sha1"])
+        elif remote_changed and local_entry["sha1"] != remote_entry["sha1"]:
+            if self._download(rel, remote_entry["path"]):
+                self._mark_synced(rel, remote_entry["sha1"])
+        else:
+            self._mark_synced(rel, local_entry["sha1"])
+
+    def _resolve_conflict(self, rel, local_entry, remote_entry):
+        strategy = self.conflict_strategy
+        emit("activity", action="conflict", path=rel, detail=strategy)
+
+        if strategy == "local":
+            if self._upload(rel, strategy="replace"):
+                self._mark_synced(rel, local_entry["sha1"])
+            return
+
+        if strategy == "remote":
+            if self._download(rel, remote_entry["path"], strategy="remove"):
+                self._mark_synced(rel, remote_entry["sha1"])
+            return
+
+        # rename: keep both -- move the local copy aside under a conflict
+        # name, upload it there, then bring down the remote version as-is.
+        base, ext = os.path.splitext(rel)
+        conflict_rel = f"{base} (local conflict copy){ext}"
+        try:
+            conflict_path = self._local_path(conflict_rel)
+            os.makedirs(os.path.dirname(conflict_path) or self.local_root, exist_ok=True)
+            os.replace(self._local_path(rel), conflict_path)
+        except OSError as exc:
+            emit("activity", action="error", path=rel, detail=str(exc))
+            return
+        if self._upload(conflict_rel):
+            self._mark_synced(conflict_rel, local_entry["sha1"])
+        if self._download(rel, remote_entry["path"], strategy="remove"):
+            self._mark_synced(rel, remote_entry["sha1"])
+
+
+def stdin_reader(engine):
+    for line in sys.stdin:
+        cmd = line.strip()
+        if cmd == "pause":
+            with engine.lock:
+                engine.paused = True
+            emit("state", paused=True)
+        elif cmd == "resume":
+            with engine.lock:
+                engine.paused = False
+            emit("state", paused=False)
+            engine.reconcile()
+        elif cmd == "sync-now":
+            engine.reconcile()
+        elif cmd == "quit":
+            engine.stop_requested = True
+            os._exit(0)
+
+
+def poll_loop(engine):
+    while not engine.stop_requested:
+        time.sleep(engine.poll_interval)
+        engine.reconcile()
+
+
+def watch_loop(engine, inotify_binary):
+    state = {"timer": None}
+
+    def trigger():
+        engine.reconcile()
+
+    proc = subprocess.Popen(
+        [
+            inotify_binary,
+            "-m",
+            "-r",
+            "-e",
+            "modify,create,close_write,delete,move",
+            "--format",
+            "%w%f",
+            engine.local_root,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    for _ in proc.stdout:
+        if state["timer"] is not None:
+            state["timer"].cancel()
+        state["timer"] = threading.Timer(DEBOUNCE_SEC, trigger)
+        state["timer"].daemon = True
+        state["timer"].start()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Two-way sync one folder with Proton Drive.")
+    parser.add_argument("--local", required=True, help="absolute local folder path")
+    parser.add_argument("--remote", required=True, help="remote folder under /my-files, e.g. /my-files/Sync")
+    parser.add_argument("--poll-interval", type=int, default=120)
+    parser.add_argument(
+        "--conflict-strategy",
+        choices=["rename", "local", "remote"],
+        default="rename",
+    )
+    parser.add_argument("--state-file", required=True)
+    parser.add_argument("--cli-binary", default="proton-drive")
+    parser.add_argument("--once", action="store_true", help="reconcile once and exit (manual testing)")
+    args = parser.parse_args()
+
+    if not args.remote.startswith("/my-files"):
+        emit("error", message="--remote must be under /my-files (Computers/devices is not supported, see SPEC.md)")
+        sys.exit(1)
+
+    if shutil.which(args.cli_binary) is None:
+        emit("error", message=f"{args.cli_binary} not found on PATH")
+        sys.exit(1)
+
+    os.makedirs(args.local, exist_ok=True)
+    os.makedirs(os.path.dirname(args.state_file) or ".", exist_ok=True)
+
+    engine = SyncEngine(args)
+
+    if args.once:
+        engine.reconcile()
+        return
+
+    emit("ready", localFolder=args.local, remoteFolder=args.remote)
+    engine.reconcile()
+
+    inotify_binary = shutil.which("inotifywait")
+    if inotify_binary:
+        threading.Thread(target=watch_loop, args=(engine, inotify_binary), daemon=True).start()
+    else:
+        emit(
+            "activity",
+            action="error",
+            path="",
+            detail="inotifywait not found; local changes will only be picked up on the poll interval",
+        )
+
+    threading.Thread(target=poll_loop, args=(engine,), daemon=True).start()
+    stdin_reader(engine)
+
+
+if __name__ == "__main__":
+    main()
