@@ -133,6 +133,23 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function syncNow(): string { sync.syncNow(); return "ok" }
+    function refresh(): string { sync.refresh(); return "ok" }
+    function debug(): string {
+      return JSON.stringify({
+        checked: sync.checked,
+        cliInstalled: sync.cliInstalled,
+        inotifyInstalled: sync.inotifyInstalled,
+        authenticated: sync.authenticated,
+        configured: sync.configured,
+        ready: sync.ready,
+        running: sync.running,
+        paused: sync.paused,
+        localFolder: sync.localFolder,
+        remoteFolder: sync.remoteFolder,
+        daemonPath: sync.daemonPath,
+        lastError: sync.lastError
+      })
+    }
     function pause(): string { if (sync.running && !sync.paused) sync.toggleRunning(); return "ok" }
     function resume(): string { if (sync.running && sync.paused) sync.toggleRunning(); return "ok" }
     function status(): string { return sync.active ? "syncing" : (sync.paused ? "paused" : "stopped") }

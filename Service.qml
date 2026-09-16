@@ -154,6 +154,13 @@ Item {
   onRemoteFolderChanged: if (running) restart()
   onPollIntervalSecChanged: if (running) restart()
   onConflictStrategyArgChanged: if (running) restart()
+  // The above only cover a *running* daemon picking up a changed setting.
+  // The far more common first-run case is: nothing was configured when the
+  // plugin loaded (so the initial checkProcess found `ready` false and
+  // never started anything), then the user sets localFolder/remoteFolder
+  // afterward via `omarchy bar set`. Nothing above reacts to that -- only
+  // this does.
+  onReadyChanged: if (ready && !daemonProcess.running) start()
 
   Component.onCompleted: refresh()
 
